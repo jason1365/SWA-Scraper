@@ -3,11 +3,13 @@ import configparser
 import sys
 import time
 from datetime import datetime
-from selenium import webdriver
+from selenium import webdriver #using Firefox rather than 
+#from selenium.webdriver import Firefox
+from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-from twilio.rest import TwilioRestClient
+from twilio.rest import Client
 
 CONFIG = configparser.ConfigParser()
 CONFIG.read('config.ini')
@@ -62,13 +64,13 @@ def parse_args():
         "--passengers",
         "-p",
         action="store",
-        type=str,
+        type=int,
         help="Number of passengers.")
 
     parser.add_argument(
-        "--desired-total",
-        "-dt",
-        type=str,
+        "--max-price",
+        "-mp",
+        type=float,
         help="Ceiling on the total cost of flights.")
 
     parser.add_argument(
@@ -78,6 +80,18 @@ def parse_args():
         default=180,
         help="Refresh time period.")
 
+    parser.add_argument(
+        "--departure-time",
+        "-dt",
+        type=str,
+        help="Time of departure flight.")
+
+    parser.add_argument(
+        "--return-time",
+        "-rt",
+        type=str,
+        help="Time of return flight.")
+    
     args = parser.parse_args()
 
     return args
@@ -88,9 +102,24 @@ def scrape(args):
     If we find a flight that meets our search parameters, send an SMS message.
     """
     while True:
-        # PhantomJS is headless, so it doesn't open up a browser.
-        browser = webdriver.PhantomJS()
+        # PhantomJS is headless, so it doesn't open up a browser. PhantomJS is now depricated.
+        #https://github.com/mozilla/geckodriver/releases
+        options = Options()
+        options.add_argument('-headless')
+        browser = webdriver.Firefox(executable_path='./geckodriver', firefox_options=options) 
+        browser.implicitly_wait(10)
+        wait30 = WebDriverWait(browser, 30)
+        wait10 = WebDriverWait(browser, 10)
+               
         browser.get("https://www.southwest.com/")
+        
+        #Check to see if page is fully loaded
+        try:
+            testelement = wait30.until(EC.visibility_of_element_located((By.ID, "jb-booking-form-submit-button")))
+        except:
+            browser.quit()
+            #retry the loop
+            break
 
         if args.one_way:
             # Set one way trip with click event.
@@ -109,6 +138,10 @@ def scrape(args):
         depart_date = browser.find_element_by_id("air-date-departure")
         depart_date.clear()
         depart_date.send_keys(args.departure_date)
+
+        # Set pay with points
+        depart_date = browser.find_element_by_id("price-type-points")
+        depart_date.click()
 
         if not args.one_way:
             # Set return date.
@@ -132,70 +165,98 @@ def scrape(args):
         return_array = []
 
         # Webdriver might be too fast. Tell it to slow down.
-        wait = WebDriverWait(browser, 120)
-        wait.until(EC.element_to_be_clickable((By.ID, "faresOutbound")))
+        try:
+            wait10.until(EC.element_to_be_clickable((By.ID, "faresOutbound")))
+            faresOutboundTableID = "faresOutbound"
+            faresReturnTableID = "faresReturn"
+            outboundTimeXPath = "td/div/span[contains(@class, 'bugText')]"
+            priceXPath = "td//label[contains(@class, 'product_price')]"
+        except:
+            #Needed to support flights to non-US airports            
+            wait10.until(EC.element_to_be_clickable((By.ID, "b0Table")))
+            faresOutboundTableID = "b0Table"
+            faresReturnTableID = "b1Table"
+            outboundTimeXPath = "(td[contains(@class, 'h6 h8')])[1]"
+            priceXPath = "td[contains(@class, 'price')]/div/label/span"
+            
+        outbound_fares = browser.find_element_by_id(faresOutboundTableID)
+        #outbound_rows = outbound_fares.find_elements_by_class_name("bugTableRow")
+        outbound_tbody = outbound_fares.find_element_by_xpath("tbody")
+        outbound_rows = outbound_tbody.find_elements_by_xpath("tr")
+        for outbound_row in outbound_rows:
+            outbound_time = outbound_row.find_elements_by_xpath(outboundTimeXPath)[0].text
+            if(outbound_time == args.departure_time):
+                outbound_prices = outbound_row.find_elements_by_xpath(priceXPath)
 
-        outbound_fares = browser.find_element_by_id("faresOutbound")
-        outbound_prices = outbound_fares.find_elements_by_class_name("product_price")
-
-        for price in outbound_prices:
-            realprice = price.text.replace("$", "")
-            outbound_array.append(int(realprice))
-
-        lowest_outbound_fare = min(outbound_array)
+                for price in outbound_prices:
+                    realprice = price.text.replace("$", "").replace(",", "").split()[0]
+                    outbound_array.append(int(realprice))
+        
+                lowest_outbound_fare = min(outbound_array)
+                break
+            else:
+                lowest_outbound_fare = 999999
 
         if not args.one_way:
-            return_fares = browser.find_element_by_id("faresReturn")
-            return_prices = return_fares.find_elements_by_class_name("product_price")
+            return_fares = browser.find_element_by_id(faresReturnTableID)
+            return_tbody = return_fares.find_element_by_xpath("tbody")
+            return_rows = return_tbody.find_elements_by_xpath("tr")
+            for return_row in return_rows:
+                return_time = return_row.find_elements_by_xpath(outboundTimeXPath)[0].text
+                if(return_time == args.return_time):
+                    return_prices = return_row.find_elements_by_xpath(priceXPath)
+            
+                    for price in return_prices:
+                        realprice = price.text.replace("$", "").replace(",", "")
+                        return_array.append(int(realprice))
+        
+                    lowest_return_fare = min(return_array)
+                    break
+                else:
+                    lowest_return_fare = 99999999
 
-            for price in return_prices:
-                realprice = price.text.replace("$", "")
-                return_array.append(int(realprice))
-
-            lowest_return_fare = min(return_array)
             real_total = lowest_outbound_fare + lowest_return_fare
 
-            print("[%s] Current Lowest Outbound Fare: $%s." % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(lowest_outbound_fare)))
+            print("[{:%Y-%m-%d %H:%M:%S}] Current Lowest Outbound Fare: {:,.2f}.".format(
+                datetime.now(), lowest_outbound_fare))
 
-            print("[%s] Current Lowest Return Fare: $%s." % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(lowest_return_fare)))
+            print("[{:%Y-%m-%d %H:%M:%S}] Current Lowest Return Fare: {:,.2f}.".format(
+                datetime.now(), lowest_return_fare))
 
         else:
             real_total = lowest_outbound_fare
-            print("[%s] Current Lowest Outbound Fare: $%s." % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(lowest_outbound_fare)))
+            print("[{:%Y-%m-%d %H:%M:%S}] Current Lowest Outbound Fare: {:,.2f}.".format(
+                datetime.now(), lowest_outbound_fare))
+
+        print("[{:%Y-%m-%d %H:%M:%S}] Current Lowest TOTAL Fare: {:,.2f}.".format(
+            datetime.now(), real_total))
 
         # Found a good deal. Send a text via Twilio and then stop running.
-        if real_total <= int(args.desired_total):
-            print("[%s] Found a deal. Desired total: $%s. Current Total: $%s." % (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                args.desired_total, str(real_total)))
+        if real_total < int(args.max_price):
+            print("[{:%Y-%m-%d %H:%M:%S}] Found a deal. Desired total: {:,.2f}. Current Total: {:,.2f}.".format(
+                datetime.now(), args.max_price, real_total))
 
-            client = TwilioRestClient(ACCOUNT_SID, AUTH_TOKEN)
-            client.messages.create(
+            client = Client(ACCOUNT_SID, AUTH_TOKEN)
+            client.api.account.messages.create(
                 to=TO_NUMBER,
                 from_=FROM_NUMBER,
-                body="[%s] Found a deal. Desired total: $%s. Current Total: $%s" % (
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    args.desired_total,
-                    str(real_total)))
+                body="[{:%Y-%m-%d %H:%M:%S}] Found a deal. Desired total: {:,.2f}. Current Total: {:,.2f}".format(
+                    datetime.now(), args.max_price, real_total))
 
             print(
-                "[%s] Text message sent!" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                "[{:%Y-%m-%d %H:%M:%S}] Text message sent!".format(datetime.now())
             )
 
             sys.exit()
 
         print(
             '''
-            [%s] Couldn\'t find a deal under the amount you specified.
+            [{:%Y-%m-%d %H:%M:%S}] Couldn\'t find a deal under the amount you specified, {:,.2f}.
             Trying again to find cheaper prices...
-            ''' % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            '''.format(datetime.now(), args.max_price)
         )
+
+        browser.quit()        
 
         # Keep scraping according to the interval the user specified.
         time.sleep(int(args.interval) * 60)
