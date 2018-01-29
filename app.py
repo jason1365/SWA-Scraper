@@ -9,14 +9,7 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-from twilio.rest import Client
 
-CONFIG = configparser.ConfigParser()
-CONFIG.read('config.ini')
-ACCOUNT_SID = CONFIG['twilio']['account_sid']
-AUTH_TOKEN = CONFIG['twilio']['auth_token']
-FROM_NUMBER = CONFIG['twilio']['from_number']
-TO_NUMBER = CONFIG['twilio']['to_number']
 
 def main():
     """
@@ -91,10 +84,58 @@ def parse_args():
         "-rt",
         type=str,
         help="Time of return flight.")
+
+    parser.add_argument(
+        '--disable-twilio',
+        dest='twilio',
+        action='store_false')
+
+    parser.add_argument(
+        '--enable-mailgun',
+        dest='mailgun',
+        action='store_true')
     
     args = parser.parse_args()
 
     return args
+
+def send_mailgun_message(messagebody, attachment_binary):
+    import requests
+
+    CONFIG = configparser.ConfigParser()
+    CONFIG.read('config.ini')
+    MAILGUN_DOMAIN = CONFIG['mailgun']['domain']
+    MAILGUN_APIKEY = CONFIG['mailgun']['api_key']
+    MAILGUN_FROM = CONFIG['mailgun']['from']
+    MAILGUN_TO = CONFIG['mailgun']['to']
+    
+    return requests.post(
+        "https://api.mailgun.net/v3/" + MAILGUN_DOMAIN + "/messages",
+        auth=("api", MAILGUN_APIKEY),
+        files=[("attachment", ("screenshot.jpg", attachment_binary))
+               ],
+        data={"from": MAILGUN_FROM,
+              "to": MAILGUN_TO,
+              "subject": "Lower price found - Southwest",
+              "text": messagebody
+              })
+
+def send_twilio_message(messagebody): 
+    from twilio.rest import Client
+    
+    CONFIG = configparser.ConfigParser()
+    CONFIG.read('config.ini')
+    ACCOUNT_SID = CONFIG['twilio']['account_sid']
+    AUTH_TOKEN = CONFIG['twilio']['auth_token']
+    FROM_NUMBER = CONFIG['twilio']['from_number']
+    TO_NUMBER = CONFIG['twilio']['to_number']
+
+    client = Client(ACCOUNT_SID, AUTH_TOKEN)
+    return client.api.account.messages.create(
+        to=TO_NUMBER,
+        from_=FROM_NUMBER,
+        body=messagebody
+        )
 
 def scrape(args):
     """
@@ -106,7 +147,7 @@ def scrape(args):
         #https://github.com/mozilla/geckodriver/releases
         options = Options()
         options.add_argument('-headless')
-        browser = webdriver.Firefox(executable_path='./geckodriver', firefox_options=options) 
+        browser = webdriver.Firefox(executable_path='./geckodriver.exe', firefox_options=options) 
         browser.implicitly_wait(10)
         wait30 = WebDriverWait(browser, 30)
         wait10 = WebDriverWait(browser, 10)
@@ -235,18 +276,28 @@ def scrape(args):
         if real_total < int(args.max_price):
             print("[{:%Y-%m-%d %H:%M:%S}] Found a deal. Desired total: {:,.2f}. Current Total: {:,.2f}.".format(
                 datetime.now(), args.max_price, real_total))
-
-            client = Client(ACCOUNT_SID, AUTH_TOKEN)
-            client.api.account.messages.create(
-                to=TO_NUMBER,
-                from_=FROM_NUMBER,
-                body="[{:%Y-%m-%d %H:%M:%S}] Found a deal. Desired total: {:,.2f}. Current Total: {:,.2f}".format(
+            
+            browser.set_window_size(1080, 2100)
+            
+            if(args.twilio):
+                result = send_twilio_message("[{:%Y-%m-%d %H:%M:%S}] Found a deal. Desired total: {:,.2f}. Current Total: {:,.2f}".format(
                     datetime.now(), args.max_price, real_total))
+                print(
+                    "[{:%Y-%m-%d %H:%M:%S}] Text message sent!".format(datetime.now())
+                )
+
+            if(args.mailgun):
+                result = send_mailgun_message("[{:%Y-%m-%d %H:%M:%S}] Found a deal. Desired total: {:,.2f}. Current Total: {:,.2f}".format(
+                        datetime.now(), args.max_price, real_total), browser.get_screenshot_as_png())
+                print(
+                    "[{:%Y-%m-%d %H:%M:%S}] Email message sent!".format(datetime.now())
+                )
+
 
             print(
-                "[{:%Y-%m-%d %H:%M:%S}] Text message sent!".format(datetime.now())
+                "[{:%Y-%m-%d %H:%M:%S}] Ending Search!".format(datetime.now())
             )
-
+            browser.quit()
             sys.exit()
 
         print(
